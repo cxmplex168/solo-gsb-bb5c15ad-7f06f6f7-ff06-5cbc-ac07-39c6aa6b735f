@@ -40,6 +40,24 @@ def call_balance(
         return json.loads(exc.read().decode("utf-8"))
 
 
+def call_acidic_half(reactant: str, product: str) -> dict:
+    payload = json.dumps({"reactants": [reactant], "products": [product]}).encode(
+        "utf-8"
+    )
+    request = urllib.request.Request(
+        f"{BASE_URL}/balance/acidic-half",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # 非法化学式 / 骨架包含 H2O、H^+、e^- 返回 400，响应体仍是 JSON
+        return json.loads(exc.read().decode("utf-8"))
+
+
 def show(
     title: str,
     reactants: list[str],
@@ -49,6 +67,14 @@ def show(
     print(f"=== {title} ===")
     print(f"请求: reactants={reactants}, products={products}, ratios={ratios}")
     result = call_balance(reactants, products, ratios)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print()
+
+
+def show_acidic_half(title: str, reactant: str, product: str) -> None:
+    print(f"=== {title} ===")
+    print(f"请求(POST /balance/acidic-half): {reactant} -> {product}")
+    result = call_acidic_half(reactant, product)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print()
 
@@ -125,6 +151,25 @@ def main() -> None:
             }
         ],
     )
+
+    # 12. 酸性半反应（还原）：只给骨架 MnO4^- -> Mn^2+，
+    #     自动补入 => MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O
+    show_acidic_half("酸性半反应（还原）", "MnO4^-", "Mn^2+")
+
+    # 13. 酸性半反应（氧化）：NH4^+ -> NO3^-，水自动移到反应物侧
+    show_acidic_half("酸性半反应（氧化）", "NH4^+", "NO3^-")
+
+    # 14. 酸性半反应：纯电子反应，H2O 与 H^+ 系数为零被删去
+    show_acidic_half("酸性半反应（纯电子）", "Fe^2+", "Fe^3+")
+
+    # 15. 酸性半反应失败：电子系数为 0（不是氧化还原半反应）
+    show_acidic_half("酸性半反应（电子系数为零）", "P4O10", "H3PO4")
+
+    # 16. 酸性半反应失败：骨架混入禁止物种 H2O/H^+/e^-（HTTP 400）
+    result = call_acidic_half("H2O", "H2")
+    print("=== 酸性半反应（骨架含禁止物种） ===")
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print()
 
 
 if __name__ == "__main__":

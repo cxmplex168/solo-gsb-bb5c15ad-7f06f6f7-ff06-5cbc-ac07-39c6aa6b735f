@@ -15,6 +15,15 @@ FormulaList = Annotated[
     ),
 ]
 
+SingleFormula = Annotated[
+    list[str],
+    Field(
+        min_length=1,
+        max_length=1,
+        description="恰好一个化学式的数组（半反应骨架的一侧）",
+    ),
+]
+
 Side = Literal["reactants", "products"]
 
 PositiveInt = Annotated[int, Field(gt=0, description="正整数")]
@@ -80,6 +89,16 @@ class BalanceRequest(BaseModel):
         return self
 
 
+class AcidicHalfBalanceRequest(BaseModel):
+    """酸性半反应配平请求：每侧恰好一个骨架化学式。
+
+    骨架不得包含 H2O、H^+、e^-（作为 HTTP 400 业务校验，由接口处理）。
+    """
+
+    reactants: SingleFormula
+    products: SingleFormula
+
+
 class SpeciesCoefficient(BaseModel):
     formula: str
     coefficient: int
@@ -118,8 +137,20 @@ class FormulaErrorDetail(BaseModel):
     message: str
 
 
+class ForbiddenSpeciesDetail(BaseModel):
+    side: Literal["reactants", "products"]
+    index: int = Field(description="该侧数组中的下标（从 0 开始）")
+    formula: str
+
+
 class BalanceFailureResponse(BaseModel):
     balanced: Literal[False] = False
-    reason: Literal["invalid_formula", "unbalanceable", "multiple_solutions"]
+    reason: Literal[
+        "invalid_formula",
+        "forbidden_species",
+        "unbalanceable",
+        "multiple_solutions",
+        "electron_coefficient_zero",
+    ]
     message: str
-    errors: list[FormulaErrorDetail] | None = None
+    errors: list[FormulaErrorDetail | ForbiddenSpeciesDetail] | None = None

@@ -18,6 +18,14 @@
 联立求解。约束可能把原本有多组独立解的反应收敛到唯一全正解；
 约束矛盾或约束后不存在全正解时判为不可配平，约束后零空间维数
 仍大于 1 时判为多组独立解。
+
+酸性半反应（:func:`balance_acidic_half_reaction`）：输入只含一种
+反应物 A 与一种生成物 B 的骨架（不得包含 ``H2O``、``H^+``、``e^-``），
+把这三种辅助物质作为**带符号未知量** ``w``、``h``、``e``（正值表示
+位于生成物侧、负值表示位于反应物侧）追加为矩阵列，与元素、电荷
+守恒方程联立精确求解。要求零空间维数恰为 1、``c_A`` 与 ``c_B`` 可
+整体取号为严格正整数且 ``e != 0``；随后负值移到反应物侧、正值放到
+生成物侧、删去零项并约成互质整数。
 """
 
 from __future__ import annotations
@@ -44,6 +52,12 @@ class MultipleSolutionsError(BalanceError):
     """零空间维数大于 1，存在多组独立配平。"""
 
     kind = "multiple_solutions"
+
+
+class ElectronCoefficientZeroError(BalanceError):
+    """半反应唯一解中电子系数为 0，本质上不是氧化还原半反应。"""
+
+    kind = "electron_coefficient_zero"
 
 
 class RatioSpec(NamedTuple):
@@ -184,6 +198,159 @@ def balance_reaction(
     }
 
 
+# 酸性半反应中由求解器自动补入、骨架中禁止出现的辅助物种。
+ACIDIC_AUX_SPECIES = ("H2O", "H^+", "e^-")
+
+
+def balance_acidic_half_reaction(reactant: str, product: str) -> dict:
+    """配平酸性条件下的半反应，骨架只含一种反应物与一种生成物。
+
+    把 ``H2O``、``H^+``、``e^-`` 作为可带符号的未知量追加到守恒
+    矩阵的列中：正值表示该辅助物质位于生成物侧，负值表示位于反应物
+    侧。骨架两种物质的系数必须严格为正；唯一解确定后按符号归位、
+    删去零项并约成互质整数。
+
+    :param reactant: 骨架反应物化学式（不得为 H2O/H^+/e^-）；
+    :param product: 骨架生成物化学式（不得为 H2O/H^+/e^-）；
+    :returns: 与 :func:`balance_reaction` 同构的结果字典；
+    :raises UnbalanceableError: 无解或骨架系数含零/正负混合；
+    :raises MultipleSolutionsError: 零空间维数大于 1；
+    :raises ElectronCoefficientZeroError: 唯一解中电子系数为 0；
+    :raises FormulaSyntaxError: 骨架化学式非法；
+    :raises ValueError: 骨架包含禁止的辅助物种 H2O/H^+/e^-。
+    """
+    if reactant in ACIDIC_AUX_SPECIES or product in ACIDIC_AUX_SPECIES:
+        raise ValueError(
+            "半反应骨架不得包含 H2O、H^+、e^-，它们由求解器自动补入"
+        )
+
+    # 列顺序固定为 [骨架反应物, 骨架生成物, H2O, H^+, e^-]。
+    # 辅助三列是带符号未知量，统一采用「生成物侧为负」的列符号约定，
+    # 故解出正值即落在生成物侧、负值移到反应物侧。
+    formulas = [reactant, product, *ACIDIC_AUX_SPECIES]
+    parsed = [parse_species(formula) for formula in formulas]
+    atom_counts = [counts for counts, _ in parsed]
+    charges = [charge for _, charge in parsed]
+    elements = sorted({el for counts in atom_counts for el in counts})
+
+    def column_sign(column: int) -> int:
+        # 骨架反应物在反应物侧（正）；骨架生成物与三个带符号辅助列
+        # 同取生成物侧符号（负），辅助列的最终侧别由解的符号决定。
+        return 1 if column == 0 else -1
+
+    rows = [
+        [
+            Rational(counts.get(el, 0)) * column_sign(i)
+            for i, counts in enumerate(atom_counts)
+        ]
+        for el in elements
+    ]
+    # 带符号电荷行：电子 e^- 电荷为 -1，乘以生成物侧符号 -1 后为 +1。
+    rows.append(
+        [Rational(charge) * column_sign(i) for i, charge in enumerate(charges)]
+    )
+
+    nullspace = Matrix(rows).nullspace()
+    if not nullspace:
+        raise UnbalanceableError(
+            "元素/电荷守恒联立 H2O、H^+、e^- 后无解，该骨架无法配平为"
+            "酸性半反应"
+        )
+    if len(nullspace) > 1:
+        raise MultipleSolutionsError(
+            f"加入 H2O、H^+、e^- 后零空间维数为 {len(nullspace)}（大于 1），"
+            "骨架不存在唯一的全正系数半反应"
+        )
+
+    basis = nullspace[0]
+    skeleton = (Rational(basis[0]), Rational(basis[1]))
+    if skeleton[0] == 0 or skeleton[1] == 0:
+        raise UnbalanceableError(
+            "唯一解中存在骨架物质系数为 0，无法在保留骨架两种物质的情况下"
+            "配平为酸性半反应"
+        )
+    # 骨架两列必须同号才能整体取号为正；异号意味着要求骨架物质跨侧。
+    if (skeleton[0] > 0) != (skeleton[1] > 0):
+        raise UnbalanceableError(
+            "唯一解的两种骨架物质系数正负混合，无法通过整体取号得到"
+            "全部为正的骨架系数"
+        )
+
+    a, b, w, h, e = _to_signed_coprime_ints(basis)
+    if e == 0:
+        raise ElectronCoefficientZeroError(
+            "唯一解中电子 e^- 的系数为 0，该骨架在酸性条件下不构成"
+            "氧化还原半反应"
+        )
+
+    # 按符号把辅助物质归位：负 -> 反应物侧，正 -> 生成物侧，零项删除。
+    reactant_side: list[tuple[str, int]] = [(reactant, a)]
+    product_side: list[tuple[str, int]] = [(product, b)]
+    for name, value in zip(ACIDIC_AUX_SPECIES, (w, h, e)):
+        if value < 0:
+            reactant_side.append((name, -value))
+        elif value > 0:
+            product_side.append((name, value))
+
+    reactant_formulas = [name for name, _ in reactant_side]
+    product_formulas = [name for name, _ in product_side]
+    reactant_coeffs = [coeff for _, coeff in reactant_side]
+    product_coeffs = [coeff for _, coeff in product_side]
+
+    counts_by_formula = dict(zip(formulas, atom_counts))
+    charges_by_formula = dict(zip(formulas, charges))
+    left_atoms = _atom_totals(
+        [counts_by_formula[name] for name in reactant_formulas],
+        reactant_coeffs,
+    )
+    right_atoms = _atom_totals(
+        [counts_by_formula[name] for name in product_formulas],
+        product_coeffs,
+    )
+    left_charge = _charge_total(
+        [charges_by_formula[name] for name in reactant_formulas],
+        reactant_coeffs,
+    )
+    right_charge = _charge_total(
+        [charges_by_formula[name] for name in product_formulas],
+        product_coeffs,
+    )
+
+    # 最终核验：两侧原子数与带符号电荷必须分别一致（理论上不会失败）。
+    if left_atoms != right_atoms:
+        raise UnbalanceableError("内部校验失败：两侧原子数不一致")
+    if left_charge != right_charge:
+        raise UnbalanceableError("内部校验失败：两侧电荷不守恒")
+
+    return {
+        "balanced": True,
+        "reactants": [
+            {"formula": formula, "coefficient": coeff}
+            for formula, coeff in zip(reactant_formulas, reactant_coeffs)
+        ],
+        "products": [
+            {"formula": formula, "coefficient": coeff}
+            for formula, coeff in zip(product_formulas, product_coeffs)
+        ],
+        "coefficients": {
+            "reactants": reactant_coeffs,
+            "products": product_coeffs,
+        },
+        "equation": _render_equation(
+            reactant_formulas, reactant_coeffs,
+            product_formulas, product_coeffs,
+        ),
+        "atom_totals": {
+            "reactants": left_atoms,
+            "products": right_atoms,
+        },
+        "charge_totals": {
+            "reactants": left_charge,
+            "products": right_charge,
+        },
+    }
+
+
 def _ratio_rows(
     ratios: list[RatioSpec], n_reactants: int, n_products: int
 ) -> list[list[Rational]]:
@@ -236,6 +403,33 @@ def _to_coprime_positive_ints(basis: Matrix) -> list[int]:
 
     values = [int(rational * common_denominator) for rational in rationals]
     if all(v < 0 for v in values):
+        values = [-v for v in values]
+
+    common_divisor = 0
+    for value in values:
+        common_divisor = gcd(common_divisor, abs(value))
+    if common_divisor > 1:
+        values = [v // common_divisor for v in values]
+    return values
+
+
+def _to_signed_coprime_ints(basis: Matrix) -> list[int]:
+    """把有理零空间基向量整体取号使首个分量为正，再约成 gcd = 1。
+
+    与 :func:`_to_coprime_positive_ints` 不同，不要求所有分量为正：
+    辅助物种（H2O/H^+/e^-）的列允许并保留负值，由调用方按符号归位。
+    """
+    rationals = [Rational(v) for v in basis]
+    denominators = [rational.q for rational in rationals]
+
+    common_denominator = 1
+    for denominator in denominators:
+        common_denominator = common_denominator * denominator // gcd(
+            common_denominator, denominator
+        )
+
+    values = [int(rational * common_denominator) for rational in rationals]
+    if values[0] < 0:
         values = [-v for v in values]
 
     common_divisor = 0
