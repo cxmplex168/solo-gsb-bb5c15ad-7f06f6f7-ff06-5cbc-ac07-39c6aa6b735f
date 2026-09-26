@@ -18,6 +18,12 @@
 联立求解。约束可能把原本有多组独立解的反应收敛到唯一全正解；
 约束矛盾或约束后不存在全正解时判为不可配平，约束后零空间维数
 仍大于 1 时判为多组独立解。
+
+酸性半反应自动补全：:func:`balance_acidic_half_reaction` 接收仅含一种
+反应物和一种生成物的半反应骨架（骨架中不得包含 H2O、H^+、e^-），把
+H2O、H^+、e^- 作为可带符号的未知项与两种骨架物质（系数限定为正数）
+一起联立元素与电荷守恒方程精确求解；解为负的未知项移到反应物侧、
+为正的放到生成物侧、为零的删去，全部系数约成互质整数。
 """
 
 from __future__ import annotations
@@ -44,6 +50,16 @@ class MultipleSolutionsError(BalanceError):
     """零空间维数大于 1，存在多组独立配平。"""
 
     kind = "multiple_solutions"
+
+
+class NoElectronTransferError(BalanceError):
+    """酸性半反应唯一解中电子系数为 0，不是氧化还原半反应。"""
+
+    kind = "no_electron_transfer"
+
+
+# 酸性半反应自动补全中作为带符号未知项的物种（顺序固定）
+ACIDIC_AUXILIARY_SPECIES = ("H2O", "H^+", "e^-")
 
 
 class RatioSpec(NamedTuple):
@@ -184,6 +200,145 @@ def balance_reaction(
     }
 
 
+def balance_acidic_half_reaction(reactant: str, product: str) -> dict:
+    """酸性条件下自动补全并配平单反应物、单生成物的半反应骨架。
+
+    把 H2O、H^+、e^- 作为可带符号的未知项（暂定生成物侧），与两种
+    骨架物质（系数限定为正数）一起联立元素守恒与电荷守恒方程，在
+    有理数域上精确求解；解为负的未知项移到反应物侧、为正的放到
+    生成物侧、为零的删去，全部系数约成互质整数。返回结构与
+    :func:`balance_reaction` 相同。
+
+    :raises UnbalanceableError: 守恒方程无解，或唯一解中骨架物质系数
+        为 0 / 异号，不存在唯一全正骨架解；
+    :raises MultipleSolutionsError: 零空间维数大于 1，骨架不能唯一配平；
+    :raises NoElectronTransferError: 唯一解中电子系数为 0，
+        该骨架不是氧化还原半反应；
+    :raises FormulaSyntaxError: 化学式非法。
+    """
+    skeleton = [reactant, product]
+    auxiliary = list(ACIDIC_AUXILIARY_SPECIES)
+    species = [*skeleton, *auxiliary]
+
+    parsed = [parse_species(formula) for formula in species]
+    atom_counts = [counts for counts, _ in parsed]
+    charges = [charge for _, charge in parsed]
+    # 骨架元素之外，H2O / H^+ 两个未知项必然引入 H、O 两种元素行
+    elements = sorted(
+        {el for counts in atom_counts[:2] for el in counts} | {"H", "O"}
+    )
+
+    # 列符号约定：骨架反应物为正；骨架生成物与三个未知项暂定生成物
+    # 侧（负），未知项解出负值即实际属于反应物侧。
+    side_signs = (1, -1, -1, -1, -1)
+    rows = [
+        [
+            Rational(counts.get(el, 0)) * sign
+            for counts, sign in zip(atom_counts, side_signs)
+        ]
+        for el in elements
+    ]
+    rows.append(
+        [Rational(charge) * sign for charge, sign in zip(charges, side_signs)]
+    )
+
+    nullspace = Matrix(rows).nullspace()
+    if not nullspace:
+        raise UnbalanceableError(
+            "元素/电荷守恒方程无解，该半反应骨架在酸性条件下无法配平"
+        )
+    if len(nullspace) > 1:
+        raise MultipleSolutionsError(
+            f"零空间维数为 {len(nullspace)}（大于 1），"
+            "该半反应骨架存在多组独立的配平系数"
+        )
+
+    values = _to_coprime_ints(nullspace[0])
+    skeleton_coeffs = values[:2]
+    if any(coeff == 0 for coeff in skeleton_coeffs):
+        raise UnbalanceableError(
+            "唯一解中存在系数为 0 的骨架物质，无法得到全正骨架解"
+        )
+    if (skeleton_coeffs[0] < 0) != (skeleton_coeffs[1] < 0):  # 留作防御
+        raise UnbalanceableError(
+            "唯一解中两种骨架物质系数异号，无法通过整体取号同时为正"
+        )
+    if skeleton_coeffs[0] < 0:
+        values = [-value for value in values]
+
+    c_reactant, c_product, c_water, c_proton, c_electron = values
+    if c_electron == 0:
+        raise NoElectronTransferError(
+            "唯一解中电子系数为 0，该骨架在酸性条件下不涉及电子转移，"
+            "不是氧化还原半反应"
+        )
+
+    # 负值未知项移到反应物侧、正值放到生成物侧、零项删去；
+    # 骨架物质始终排在各自侧的最前。
+    reactant_side = [(reactant, c_reactant)]
+    product_side = [(product, c_product)]
+    for formula, coeff in zip(auxiliary, (c_water, c_proton, c_electron)):
+        if coeff < 0:
+            reactant_side.append((formula, -coeff))
+        elif coeff > 0:
+            product_side.append((formula, coeff))
+
+    parsed_by_formula = dict(zip(species, parsed))
+    reactant_formulas = [formula for formula, _ in reactant_side]
+    reactant_coeffs = [coeff for _, coeff in reactant_side]
+    product_formulas = [formula for formula, _ in product_side]
+    product_coeffs = [coeff for _, coeff in product_side]
+
+    left_atoms = _atom_totals(
+        [parsed_by_formula[f][0] for f in reactant_formulas], reactant_coeffs
+    )
+    right_atoms = _atom_totals(
+        [parsed_by_formula[f][0] for f in product_formulas], product_coeffs
+    )
+
+    # 最终核验：两侧各元素原子数必须完全一致。
+    if left_atoms != right_atoms:  # 理论上不会发生，留作防御
+        raise UnbalanceableError("内部校验失败：两侧原子数不一致")
+
+    left_charge = _charge_total(
+        [parsed_by_formula[f][1] for f in reactant_formulas], reactant_coeffs
+    )
+    right_charge = _charge_total(
+        [parsed_by_formula[f][1] for f in product_formulas], product_coeffs
+    )
+
+    # 最终核验：两侧带符号总电荷必须一致。
+    if left_charge != right_charge:  # 理论上不会发生，留作防御
+        raise UnbalanceableError("内部校验失败：两侧电荷不守恒")
+
+    return {
+        "balanced": True,
+        "reactants": [
+            {"formula": formula, "coefficient": coeff}
+            for formula, coeff in reactant_side
+        ],
+        "products": [
+            {"formula": formula, "coefficient": coeff}
+            for formula, coeff in product_side
+        ],
+        "coefficients": {
+            "reactants": reactant_coeffs,
+            "products": product_coeffs,
+        },
+        "equation": _render_equation(
+            reactant_formulas, reactant_coeffs, product_formulas, product_coeffs
+        ),
+        "atom_totals": {
+            "reactants": left_atoms,
+            "products": right_atoms,
+        },
+        "charge_totals": {
+            "reactants": left_charge,
+            "products": right_charge,
+        },
+    }
+
+
 def _ratio_rows(
     ratios: list[RatioSpec], n_reactants: int, n_products: int
 ) -> list[list[Rational]]:
@@ -223,8 +378,8 @@ def _column_index(
     return base + index
 
 
-def _to_coprime_positive_ints(basis: Matrix) -> list[int]:
-    """把有理零空间基向量取号为正并约成 gcd = 1 的最小正整数。"""
+def _to_coprime_ints(basis: Matrix) -> list[int]:
+    """把有理零空间基向量转成 gcd = 1 的整数向量（保留各项符号）。"""
     rationals = [Rational(v) for v in basis]
     denominators = [rational.q for rational in rationals]
 
@@ -235,14 +390,20 @@ def _to_coprime_positive_ints(basis: Matrix) -> list[int]:
         )
 
     values = [int(rational * common_denominator) for rational in rationals]
-    if all(v < 0 for v in values):
-        values = [-v for v in values]
 
     common_divisor = 0
     for value in values:
         common_divisor = gcd(common_divisor, abs(value))
     if common_divisor > 1:
         values = [v // common_divisor for v in values]
+    return values
+
+
+def _to_coprime_positive_ints(basis: Matrix) -> list[int]:
+    """把有理零空间基向量取号为正并约成 gcd = 1 的最小正整数。"""
+    values = _to_coprime_ints(basis)
+    if all(v < 0 for v in values):
+        values = [-v for v in values]
     return values
 
 

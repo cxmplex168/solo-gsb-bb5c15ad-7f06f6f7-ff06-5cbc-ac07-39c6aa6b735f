@@ -80,10 +80,34 @@ class BalanceRequest(BaseModel):
         return self
 
 
+class AcidicHalfRequest(BaseModel):
+    """酸性半反应骨架：两侧必须恰好各含 1 个化学式。
+
+    H2O、H^+、e^- 由接口自动补全，不得出现在骨架中（否则 HTTP 400，
+    reason 为 forbidden_species）。
+    """
+
+    reactants: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            max_length=1,
+            description="半反应骨架的反应物，恰好 1 个化学式（不得为 H2O、H^+、e^-）",
+        ),
+    ]
+    products: Annotated[
+        list[str],
+        Field(
+            min_length=1,
+            max_length=1,
+            description="半反应骨架的生成物，恰好 1 个化学式（不得为 H2O、H^+、e^-）",
+        ),
+    ]
+
+
 class SpeciesCoefficient(BaseModel):
     formula: str
     coefficient: int
-
 
 class CoefficientPair(BaseModel):
     reactants: list[int]
@@ -120,6 +144,12 @@ class FormulaErrorDetail(BaseModel):
 
 class BalanceFailureResponse(BaseModel):
     balanced: Literal[False] = False
-    reason: Literal["invalid_formula", "unbalanceable", "multiple_solutions"]
+    reason: Literal[
+        "invalid_formula",
+        "forbidden_species",
+        "unbalanceable",
+        "multiple_solutions",
+        "no_electron_transfer",
+    ]
     message: str
     errors: list[FormulaErrorDetail] | None = None

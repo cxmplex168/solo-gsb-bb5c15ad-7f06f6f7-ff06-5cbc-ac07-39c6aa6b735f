@@ -343,3 +343,122 @@ def test_ratios_omitted_keeps_original_behavior():
     data = response.json()
     assert data["balanced"] is False
     assert data["reason"] == "multiple_solutions"
+
+
+def test_acidic_half_success():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["MnO4^-"], "products": ["Mn^2+"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balanced"] is True
+    assert data["coefficients"] == {"reactants": [1, 8, 5], "products": [1, 4]}
+    assert data["equation"] == "MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O"
+    assert data["atom_totals"]["reactants"] == {"H": 8, "Mn": 1, "O": 4}
+    assert data["atom_totals"]["products"] == {"H": 8, "Mn": 1, "O": 4}
+    assert data["charge_totals"] == {"reactants": 2, "products": 2}
+
+
+def test_acidic_half_zero_terms_dropped():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["Fe^2+"], "products": ["Fe^3+"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balanced"] is True
+    assert data["coefficients"] == {"reactants": [1], "products": [1, 1]}
+    assert data["equation"] == "Fe^2+ -> Fe^3+ + e^-"
+
+
+def test_acidic_half_forbidden_species_rejected():
+    for forbidden in ("H2O", "H^+", "e^-"):
+        response = client.post(
+            "/balance/acidic-half",
+            json={"reactants": [forbidden], "products": ["Mn^2+"]},
+        )
+        assert response.status_code == 400, forbidden
+        data = response.json()
+        assert data["balanced"] is False
+        assert data["reason"] == "forbidden_species"
+        assert data["errors"][0]["side"] == "reactants"
+        assert data["errors"][0]["formula"] == forbidden
+
+
+def test_acidic_half_forbidden_species_equivalent_spellings():
+    # HOH 解析结果与 H2O 相同、H1^+ 与 H^+ 相同，同样被拒绝
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["HOH"], "products": ["H1^+"]},
+    )
+    assert response.status_code == 400
+    data = response.json()
+    assert data["reason"] == "forbidden_species"
+    assert {(e["side"], e["index"]) for e in data["errors"]} == {
+        ("reactants", 0),
+        ("products", 0),
+    }
+
+
+def test_acidic_half_invalid_formula_returns_position():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["MnO4-"], "products": ["Mn^2+"]},
+    )
+    assert response.status_code == 400
+    data = response.json()
+    assert data["balanced"] is False
+    assert data["reason"] == "invalid_formula"
+    error = data["errors"][0]
+    assert error["side"] == "reactants"
+    assert error["index"] == 0
+    assert error["position"] == 4
+
+
+def test_acidic_half_unbalanceable():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["KMnO4"], "products": ["K2MnO4"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balanced"] is False
+    assert data["reason"] == "unbalanceable"
+
+
+def test_acidic_half_multiple_solutions():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["H2O2"], "products": ["O2"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balanced"] is False
+    assert data["reason"] == "multiple_solutions"
+
+
+def test_acidic_half_no_electron_transfer():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["H2CO3"], "products": ["HCO3^-"]},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["balanced"] is False
+    assert data["reason"] == "no_electron_transfer"
+
+
+def test_acidic_half_requires_exactly_one_species_per_side():
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": ["MnO4^-", "H^+"], "products": ["Mn^2+"]},
+    )
+    assert response.status_code == 422
+    response = client.post(
+        "/balance/acidic-half",
+        json={"reactants": [], "products": ["Mn^2+"]},
+    )
+    assert response.status_code == 422
+    response = client.post("/balance/acidic-half", json={"reactants": ["MnO4^-"]})
+    assert response.status_code == 422

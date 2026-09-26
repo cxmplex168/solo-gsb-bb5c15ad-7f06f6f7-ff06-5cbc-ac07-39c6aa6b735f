@@ -25,9 +25,20 @@ def call_balance(
     payload_dict: dict = {"reactants": reactants, "products": products}
     if ratios is not None:
         payload_dict["ratios"] = ratios
+    return _post(f"{BASE_URL}/balance", payload_dict)
+
+
+def call_acidic_half(reactant: str, product: str) -> dict:
+    return _post(
+        f"{BASE_URL}/balance/acidic-half",
+        {"reactants": [reactant], "products": [product]},
+    )
+
+
+def _post(url: str, payload_dict: dict) -> dict:
     payload = json.dumps(payload_dict).encode("utf-8")
     request = urllib.request.Request(
-        f"{BASE_URL}/balance",
+        url,
         data=payload,
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -36,7 +47,8 @@ def call_balance(
         with urllib.request.urlopen(request) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        # 非法化学式返回 400、非法比值约束返回 422，响应体仍是 JSON
+        # 非法化学式 / 骨架含自动补全物种返回 400、非法比值约束返回 422，
+        # 响应体仍是 JSON
         return json.loads(exc.read().decode("utf-8"))
 
 
@@ -49,6 +61,14 @@ def show(
     print(f"=== {title} ===")
     print(f"请求: reactants={reactants}, products={products}, ratios={ratios}")
     result = call_balance(reactants, products, ratios)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print()
+
+
+def show_acidic_half(title: str, reactant: str, product: str) -> None:
+    print(f"=== {title} ===")
+    print(f"请求: reactants=[{reactant!r}], products=[{product!r}]")
+    result = call_acidic_half(reactant, product)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     print()
 
@@ -125,6 +145,13 @@ def main() -> None:
             }
         ],
     )
+
+    # 12. 酸性半反应自动补全：只给骨架 MnO4^- -> Mn^2+，
+    #     H2O、H^+、e^- 由接口求解并放到正确的一侧
+    show_acidic_half("酸性半反应（自动补全）", "MnO4^-", "Mn^2+")
+
+    # 13. 骨架混入自动补全物种：H2O 不得出现在骨架中（HTTP 400）
+    show_acidic_half("酸性半反应（骨架含 H2O）", "H2O", "Mn^2+")
 
 
 if __name__ == "__main__":

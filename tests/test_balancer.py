@@ -2,8 +2,10 @@ import pytest
 
 from app.balancer import (
     MultipleSolutionsError,
+    NoElectronTransferError,
     RatioSpec,
     UnbalanceableError,
+    balance_acidic_half_reaction,
     balance_reaction,
 )
 
@@ -250,3 +252,86 @@ def test_ratio_invalid_spec_raises_value_error():
             ["H2O"],
             ratios=[RatioSpec(("left", 0), ("reactants", 1), 1, 1)],
         )
+
+
+def test_acidic_half_permanganate_reduction():
+    # 经典酸性还原半反应：MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O
+    result = balance_acidic_half_reaction("MnO4^-", "Mn^2+")
+    assert result["coefficients"] == {"reactants": [1, 8, 5], "products": [1, 4]}
+    assert result["equation"] == "MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O"
+    assert result["charge_totals"] == {"reactants": 2, "products": 2}
+    totals = result["atom_totals"]
+    assert totals["reactants"] == totals["products"] == {"H": 8, "Mn": 1, "O": 4}
+    # 骨架物质排在各自侧最前，自动补全项按 H2O、H^+、e^- 顺序追加
+    assert [s["formula"] for s in result["reactants"]] == ["MnO4^-", "H^+", "e^-"]
+    assert [s["formula"] for s in result["products"]] == ["Mn^2+", "H2O"]
+
+
+def test_acidic_half_zero_terms_dropped():
+    # Fe^2+ -> Fe^3+ + e^-：H2O 与 H^+ 系数为 0，直接删去
+    result = balance_acidic_half_reaction("Fe^2+", "Fe^3+")
+    assert result["coefficients"] == {"reactants": [1], "products": [1, 1]}
+    assert result["equation"] == "Fe^2+ -> Fe^3+ + e^-"
+    assert result["charge_totals"] == {"reactants": 2, "products": 2}
+
+
+def test_acidic_half_water_on_reactant_side():
+    # H2O 解为负值移到反应物侧，H^+ 与 e^- 为正值放到生成物侧
+    result = balance_acidic_half_reaction("SO3^2-", "SO4^2-")
+    assert result["coefficients"] == {"reactants": [1, 1], "products": [1, 2, 2]}
+    assert result["equation"] == "SO3^2- + H2O -> SO4^2- + 2H^+ + 2e^-"
+    assert result["charge_totals"] == {"reactants": -2, "products": -2}
+    totals = result["atom_totals"]
+    assert totals["reactants"] == totals["products"] == {"H": 2, "O": 4, "S": 1}
+
+
+def test_acidic_half_water_on_product_side():
+    # MnO2 + 4H^+ + 2e^- -> Mn^2+ + 2H2O
+    result = balance_acidic_half_reaction("MnO2", "Mn^2+")
+    assert result["coefficients"] == {"reactants": [1, 4, 2], "products": [1, 2]}
+    assert result["equation"] == "MnO2 + 4H^+ + 2e^- -> Mn^2+ + 2H2O"
+
+
+def test_acidic_half_dichromate_coprime_coefficients():
+    # Cr2O7^2- + 14H^+ + 6e^- -> 2Cr^3+ + 7H2O，全体系数互质
+    result = balance_acidic_half_reaction("Cr2O7^2-", "Cr^3+")
+    coeffs = (
+        result["coefficients"]["reactants"] + result["coefficients"]["products"]
+    )
+    assert coeffs == [1, 14, 6, 2, 7]
+    from functools import reduce
+    from math import gcd
+
+    assert reduce(gcd, coeffs) == 1
+
+
+def test_acidic_half_electron_on_product_side():
+    # 氧化半反应：C2O4^2- -> 2CO2 + 2e^-（H2O、H^+ 系数为 0 被删去）
+    result = balance_acidic_half_reaction("C2O4^2-", "CO2")
+    assert result["coefficients"] == {"reactants": [1], "products": [2, 2]}
+    assert result["equation"] == "C2O4^2- -> 2CO2 + 2e^-"
+    assert result["charge_totals"] == {"reactants": -2, "products": -2}
+
+
+def test_acidic_half_no_electron_transfer():
+    # H2CO3 -> HCO3^- + H^+ 是酸碱解离，电子系数为 0
+    with pytest.raises(NoElectronTransferError):
+        balance_acidic_half_reaction("H2CO3", "HCO3^-")
+
+
+def test_acidic_half_unbalanceable_no_solution():
+    # K 元素无法守恒：KMnO4 -> K2MnO4 零空间为空
+    with pytest.raises(UnbalanceableError):
+        balance_acidic_half_reaction("KMnO4", "K2MnO4")
+
+
+def test_acidic_half_unbalanceable_zero_skeleton_coefficient():
+    # Fe 与 O2 无共同元素，唯一解中骨架反应物系数为 0
+    with pytest.raises(UnbalanceableError):
+        balance_acidic_half_reaction("Fe", "O2")
+
+
+def test_acidic_half_multiple_solutions():
+    # 骨架只含 H、O 元素时 H2O / H^+ 无法唯一确定：零空间维数为 2
+    with pytest.raises(MultipleSolutionsError):
+        balance_acidic_half_reaction("H2O2", "O2")

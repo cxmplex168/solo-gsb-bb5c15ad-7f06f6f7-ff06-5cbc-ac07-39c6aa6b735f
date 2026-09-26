@@ -1,7 +1,9 @@
 # 化学反应配平 API
 
 用 **Python + FastAPI + SymPy** 实现的化学反应式自动配平服务，支持普通反应、
-**离子反应**与**含电子的半反应**，并支持可选的 **系数比约束（ratios）**。
+**离子反应**与**含电子的半反应**，并支持可选的 **系数比约束（ratios）**；
+另提供 **酸性半反应自动补全接口**：只给一种反应物和一种生成物的骨架，
+H2O、H^+、e^- 由接口作为带符号未知项自动求解并放到正确的一侧。
 
 按元素守恒与电荷守恒构建**精确整数矩阵**（SymPy 有理数运算，无浮点误差），仅当：
 
@@ -62,6 +64,7 @@ docker compose down
 
 - 服务地址：`http://localhost:8000`
 - 配平接口：`POST http://localhost:8000/balance`
+- 酸性半反应自动补全接口：`POST http://localhost:8000/balance/acidic-half`
 - 健康检查：`GET http://localhost:8000/health`
 - Swagger 交互文档：`http://localhost:8000/docs`
 - OpenAPI Schema：`http://localhost:8000/openapi.json`
@@ -231,6 +234,85 @@ pip install pytest && python -m pytest -q
 }
 ```
 
+### `POST /balance/acidic-half`
+
+酸性条件下的**半反应自动补全**：只需给出仅含**一种反应物和一种生成物**的
+半反应骨架（化学式与电荷写法与 `/balance` 相同），接口把 **H2O、H^+、e^-**
+作为**可带符号的未知项**与两种骨架物质（系数限定为正数）一起联立元素守恒与
+电荷守恒方程精确求解。解出后：**负值**未知项移到反应物侧、**正值**放到
+生成物侧、**零项删去**，全部系数约成互质整数。
+
+请求体（两个数组都必须**恰好含 1 个**化学式，否则 HTTP 422）：
+
+```json
+{
+  "reactants": ["MnO4^-"],
+  "products": ["Mn^2+"]
+}
+```
+
+骨架中**不得包含 H2O、H^+、e^-**（它们由接口自动补全）；按解析结果匹配，
+`HOH`、`H1^+` 等等价写法同样会被拒绝（HTTP 400，`reason: "forbidden_species"`）。
+
+#### 成功（HTTP 200，`balanced: true`）
+
+返回结构与 `/balance` 完全一致：骨架物质排在各自侧最前，自动补全的
+H2O、H^+、e^- 按此顺序追加到实际所属的一侧：
+
+```json
+{
+  "balanced": true,
+  "reactants": [
+    {"formula": "MnO4^-", "coefficient": 1},
+    {"formula": "H^+", "coefficient": 8},
+    {"formula": "e^-", "coefficient": 5}
+  ],
+  "products": [
+    {"formula": "Mn^2+", "coefficient": 1},
+    {"formula": "H2O", "coefficient": 4}
+  ],
+  "coefficients": {"reactants": [1, 8, 5], "products": [1, 4]},
+  "equation": "MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O",
+  "atom_totals": {
+    "reactants": {"H": 8, "Mn": 1, "O": 4},
+    "products": {"H": 8, "Mn": 1, "O": 4}
+  },
+  "charge_totals": {"reactants": 2, "products": 2}
+}
+```
+
+系数为 0 的自动补全项会被删去，例如 `Fe^2+ -> Fe^3+` 的结果为
+`Fe^2+ -> Fe^3+ + e^-`（不出现 H2O 与 H^+）；H2O 解为负值时移到反应物侧，
+例如 `SO3^2- + H2O -> SO4^2- + 2H^+ + 2e^-`。
+
+#### 失败（`balanced: false`）
+
+- **HTTP 200，`reason: "unbalanceable"`**：守恒方程无解，或唯一解中骨架
+  物质系数为 0 / 异号，不存在唯一全正骨架解（如 `KMnO4 -> K2MnO4`，
+  K 元素无法守恒）；
+- **HTTP 200，`reason: "multiple_solutions"`**：零空间维数大于 1，骨架
+  不能唯一配平（如 `H2O2 -> O2`，骨架只含 H、O 时 H2O 与 H^+ 无法唯一确定）；
+- **HTTP 200，`reason: "no_electron_transfer"`**：唯一解中电子系数为 0，
+  该骨架不是氧化还原半反应（如 `H2CO3 -> HCO3^-` 只是酸碱解离）；
+- **HTTP 400，`reason: "invalid_formula"`**：化学式非法，结构同 `/balance`；
+- **HTTP 400，`reason: "forbidden_species"`**：骨架含 H2O、H^+、e^-：
+
+```json
+{
+  "balanced": false,
+  "reason": "forbidden_species",
+  "message": "骨架中不得包含 H2O、H^+、e^-（由接口自动补全），详见 errors",
+  "errors": [
+    {
+      "side": "reactants",
+      "index": 0,
+      "formula": "H2O",
+      "message": "H2O 由接口在酸性条件下自动补全，不得出现在半反应骨架中"
+    }
+  ]
+}
+```
+
 ## 可调用示例
 
 ### curl
@@ -259,12 +341,17 @@ curl -s -X POST http://localhost:8000/balance \
        "ratios": [{"left": {"side": "reactants", "index": 0},
                    "right": {"side": "reactants", "index": 2},
                    "ratio": [1, 1]}]}'
+
+# 酸性半反应自动补全：只给骨架，H2O、H^+、e^- 由接口求解
+curl -s -X POST http://localhost:8000/balance/acidic-half \
+  -H 'Content-Type: application/json' \
+  -d '{"reactants": ["MnO4^-"], "products": ["Mn^2+"]}'
 ```
 
 ### Python（仅标准库）
 
 `examples/example_call.py` 演示普通配平、离子/半反应、系数比约束、无法配平、
-多组解、非法化学式与非法比值约束（422）等场景：
+多组解、非法化学式、非法比值约束（422）与酸性半反应自动补全等场景：
 
 ```bash
 python examples/example_call.py
@@ -300,6 +387,14 @@ resp = requests.post(
 )
 print(resp.json())
 # 2H2O -> 2H2 + O2（约束与守恒一致，仍收敛到同一最小整数解）
+
+# 酸性半反应自动补全：骨架 MnO4^- -> Mn^2+
+resp = requests.post(
+    "http://localhost:8000/balance/acidic-half",
+    json={"reactants": ["MnO4^-"], "products": ["Mn^2+"]},
+)
+print(resp.json())
+# MnO4^- + 8H^+ + 5e^- -> Mn^2+ + 4H2O
 ```
 
 ## 算法与判定规则
@@ -321,18 +416,26 @@ print(resp.json())
 7. 校验 `A·c = 0`（原子守恒、电荷守恒且满足全部比值约束）后返回系数、
    两侧原子总数与两侧带符号总电荷。
 
+`/balance/acidic-half` 的求解流程类似：矩阵列固定为
+`[骨架反应物, 骨架生成物, H2O, H^+, e^-]`（骨架反应物列取正，其余列取负，
+即未知项暂定生成物侧），行取骨架元素与 H、O 的并集再加一行电荷；
+零空间维数必须恰为 1，且两种骨架物质系数同号非零（整体取号为正）；
+H2O、H^+、e^- 的带符号解为负则移到反应物侧、为正放到生成物侧、
+为零则删去；电子系数为 0 判为 `no_electron_transfer`；
+最终全部系数约成互质整数并同样校验 `A·c = 0`。
+
 ## 项目结构
 
 ```
 .
 ├── app/
-│   ├── main.py       # FastAPI 入口（/balance、/health）
-│   ├── schemas.py    # Pydantic 请求/响应模型（含 ratios 校验）
-│   ├── balancer.py   # 元素+电荷守恒矩阵、比值约束行与零空间配平
+│   ├── main.py       # FastAPI 入口（/balance、/balance/acidic-half、/health）
+│   ├── schemas.py    # Pydantic 请求/响应模型（含 ratios 与半反应骨架校验）
+│   ├── balancer.py   # 元素+电荷守恒矩阵、比值约束行、零空间配平与酸性半反应补全
 │   └── parser.py     # 化学式/电荷/电子递归下降解析（四层括号/位置报错）
 ├── examples/
 │   └── example_call.py
-├── tests/            # pytest 测试（62 个用例）
+├── tests/            # pytest 测试（81 个用例）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
